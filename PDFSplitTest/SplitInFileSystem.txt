@@ -1,0 +1,99 @@
+﻿using System;
+using System.IO;
+using PdfSharpCore.Pdf;
+using PdfSharpCore.Pdf.IO;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        string inputPdfPath = "path/to/your/largefile.pdf";
+        string outputDirectory = "path/to/output/directory";
+        long maxFileSize = 1 * 1024 * 1024; // 1 MB in byte
+
+        // Apri il file come stream e passa al metodo
+        using (var inputStream = new FileStream(inputPdfPath, FileMode.Open, FileAccess.Read))
+        {
+            SplitPdfBySize(inputStream, outputDirectory, maxFileSize);
+        }
+    }
+
+    static void SplitPdfBySize(Stream inputStream, string outputDirectory, long maxFileSize)
+    {
+        if (!Directory.Exists(outputDirectory))
+        {
+            Directory.CreateDirectory(outputDirectory);
+        }
+
+        using (var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import))
+        {
+            int totalPages = inputDocument.PageCount;
+            int fileCount = 1;
+            var outputDocument = new PdfDocument();
+            long currentSize = 0;
+
+            for (int i = 0; i < totalPages; i++)
+            {
+                var page = inputDocument.Pages[i];
+
+                // Stima della dimensione della pagina
+                using (var ms = new MemoryStream())
+                {
+                    var tempDocument = new PdfDocument();
+                    tempDocument.AddPage(page);
+                    tempDocument.Save(ms, false);
+                    long pageSize = ms.Length;
+
+                    // Se la dimensione della pagina supera il limite massimo, salvala in un file separato
+                    if (pageSize > maxFileSize)
+                    {
+                        if (outputDocument.PageCount > 0)
+                        {
+                            string outputFilePath = Path.Combine(outputDirectory, $"part_{fileCount}.pdf");
+                            outputDocument.Save(outputFilePath);
+                            Console.WriteLine($"Creato: {outputFilePath} con {outputDocument.PageCount} pagine");
+                            fileCount++;
+                            outputDocument = new PdfDocument();
+                            currentSize = 0;
+                        }
+
+                        // Salva la pagina grande in un file separato
+                        var singlePageDocument = new PdfDocument();
+                        singlePageDocument.AddPage(page);
+                        string singlePageFilePath = Path.Combine(outputDirectory, $"part_{fileCount}_single_page.pdf");
+                        singlePageDocument.Save(singlePageFilePath);
+                        Console.WriteLine($"Creato: {singlePageFilePath} con 1 pagina (dimensione: {pageSize} byte)");
+                        fileCount++;
+                    }
+                    else if (currentSize + pageSize > maxFileSize)
+                    {
+                        // Salva il documento corrente e inizia un nuovo documento
+                        string outputFilePath = Path.Combine(outputDirectory, $"part_{fileCount}.pdf");
+                        outputDocument.Save(outputFilePath);
+                        Console.WriteLine($"Creato: {outputFilePath} con {outputDocument.PageCount} pagine");
+                        fileCount++;
+                        outputDocument = new PdfDocument();
+                        outputDocument.AddPage(page);
+                        currentSize = pageSize;
+                    }
+                    else
+                    {
+                        // Aggiungi la pagina al documento corrente
+                        outputDocument.AddPage(page);
+                        currentSize += pageSize;
+                    }
+                }
+            }
+
+            // Salva l'ultimo documento se contiene pagine
+            if (outputDocument.PageCount > 0)
+            {
+                string outputFilePath = Path.Combine(outputDirectory, $"part_{fileCount}.pdf");
+                outputDocument.Save(outputFilePath);
+                Console.WriteLine($"Creato: {outputFilePath} con {outputDocument.PageCount} pagine");
+            }
+        }
+
+        Console.WriteLine("Divisione del PDF completata.");
+    }
+}

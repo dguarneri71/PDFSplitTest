@@ -1,0 +1,170 @@
+﻿using System;
+using System.IO;
+using System.Threading.Tasks;
+using Microsoft.Graph;
+using Microsoft.Identity.Client;
+using PdfSharpCore.Pdf;
+using PdfSharpCore.Pdf.IO;
+
+class Program
+{
+    private static string clientId = "YOUR_CLIENT_ID";
+    private static string tenantId = "YOUR_TENANT_ID";
+    private static string clientSecret = "YOUR_CLIENT_SECRET";
+    private static string siteId = "YOUR_SHAREPOINT_SITE_ID";
+    private static string driveId = "YOUR_DOCUMENT_LIBRARY_ID";
+
+    static async Task Main(string[] args)
+    {
+        string inputFileName = "largefile.pdf";
+        string outputDirectoryName = "SplitPDFs";
+        long maxFileSize = 1 * 1024 * 1024; // 1 MB in byte
+
+        // Autenticazione con Microsoft Graph
+        var graphClient = GetAuthenticatedGraphClient();
+
+        // Leggi il file PDF da SharePoint
+        var inputFileStream = await DownloadFileFromSharePoint(graphClient, inputFileName);
+
+        // Dividi il PDF
+        await SplitPdfBySize(graphClient, inputFileStream, outputDirectoryName, maxFileSize);
+
+        Console.WriteLine("Divisione del PDF completata e file caricati su SharePoint.");
+    }
+
+    static GraphServiceClient GetAuthenticatedGraphClient()
+    {
+        var confidentialClientApplication = ConfidentialClientApplicationBuilder
+            .Create(clientId)
+            .WithTenantId(tenantId)
+            .WithClientSecret(clientSecret)
+            .Build();
+
+        var authProvider = new DelegateAuthenticationProvider(async (requestMessage) =>
+        {
+            var authResult = await confidentialClientApplication
+                .AcquireTokenForClient(new[] { "https://graph.microsoft.com/.default" })
+                .ExecuteAsync();
+
+            requestMessage.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", authResult.AccessToken);
+        });
+
+        return new GraphServiceClient(authProvider);
+    }
+
+    static async Task<Stream> DownloadFileFromSharePoint(GraphServiceClient graphClient, string fileName)
+    {
+        var fileContent = await graphClient.Sites[siteId]
+            .Drives[driveId]
+            .Root
+            .ItemWithPath(fileName)
+            .Content
+            .Request()
+            .GetAsync();
+
+        return fileContent;
+    }
+
+    static async Task UploadFileToSharePoint(GraphServiceClient graphClient, Stream fileStream, string fileName, string folderName)
+    {
+        await graphClient.Sites[siteId]
+            .Drives[driveId]
+            .Root
+            .ItemWithPath($"{folderName}/{fileName}")
+            .Content
+            .Request()
+            .PutAsync<DriveItem>(fileStream);
+    }
+
+    static async Task SplitPdfBySize(GraphServiceClient graphClient, Stream inputStream, string outputDirectoryName, long maxFileSize)
+    {
+        using (var inputDocument = PdfReader.Open(inputStream, PdfDocumentOpenMode.Import))
+        {
+            int totalPages = inputDocument.PageCount;
+            int fileCount = 1;
+            var outputDocument = new PdfDocument();
+            long currentSize = 0;
+
+            for (int i = 0; i < totalPages; i++)
+            {
+                var page = inputDocument.Pages[i];
+
+                // Stima della dimensione della pagina
+                using (var ms = new MemoryStream())
+                {
+                    var tempDocument = new PdfDocument();
+                    tempDocument.AddPage(page);
+                    tempDocument.Save(ms, false);
+                    long pageSize = ms.Length;
+
+                    // Se la dimensione della pagina supera il limite massimo, salvala in un file separato
+                    if (pageSize > maxFileSize)
+                    {
+                        if (outputDocument.PageCount > 0)
+                        {
+                            string outputFileName = $"part_{fileCount}.pdf";
+                            using (var outputStream = new MemoryStream())
+                            {
+                                outputDocument.Save(outputStream);
+                                outputStream.Position = 0;
+                                await UploadFileToSharePoint(graphClient, outputStream, outputFileName, outputDirectoryName);
+                                Console.WriteLine($"Caricato: {outputFileName} con {outputDocument.PageCount} pagine");
+                            }
+                            fileCount++;
+                            outputDocument = new PdfDocument();
+                            currentSize = 0;
+                        }
+
+                        // Salva la pagina grande in un file separato
+                        var singlePageDocument = new PdfDocument();
+                        singlePageDocument.AddPage(page);
+                        string singlePageFileName = $"part_{fileCount}_single_page.pdf";
+                        using (var singlePageStream = new MemoryStream())
+                        {
+                            singlePageDocument.Save(singlePageStream);
+                            singlePageStream.Position = 0;
+                            await UploadFileToSharePoint(graphClient, singlePageStream, singlePageFileName, outputDirectoryName);
+                            Console.WriteLine($"Caricato: {singlePageFileName} con 1 pagina (dimensione: {pageSize} byte)");
+                        }
+                        fileCount++;
+                    }
+                    else if (currentSize + pageSize > maxFileSize)
+                    {
+                        // Salva il documento corrente e inizia un nuovo documento
+                        string outputFileName = $"part_{fileCount}.pdf";
+                        using (var outputStream = new MemoryStream())
+                        {
+                            outputDocument.Save(outputStream);
+                            outputStream.Position = 0;
+                            await UploadFileToSharePoint(graphClient, outputStream, outputFileName, outputDirectoryName);
+                            Console.WriteLine($"Caricato: {outputFileName} con {outputDocument.PageCount} pagine");
+                        }
+                        fileCount++;
+                        outputDocument = new PdfDocument();
+                        outputDocument.AddPage(page);
+                        currentSize = pageSize;
+                    }
+                    else
+                    {
+                        // Aggiungi la pagina al documento corrente
+                        outputDocument.AddPage(page);
+                        currentSize += pageSize;
+                    }
+                }
+            }
+
+            // Salva l'ultimo documento se contiene pagine
+            if (outputDocument.PageCount > 0)
+            {
+                string outputFileName = $"part_{fileCount}.pdf";
+                using (var outputStream = new MemoryStream())
+                {
+                    outputDocument.Save(outputStream);
+                    outputStream.Position = 0;
+                    await UploadFileToSharePoint(graphClient, outputStream, outputFileName, outputDirectoryName);
+                    Console.WriteLine($"Caricato: {outputFileName} con {outputDocument.PageCount} pagine");
+                }
+            }
+        }
+    }
+}
